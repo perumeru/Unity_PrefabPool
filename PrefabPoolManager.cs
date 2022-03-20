@@ -4,12 +4,10 @@ using System.Collections.Generic;
 
 public interface IPrefabInstantiate
 {
-    int MaxSize { get; }
-    int RemainingSize { get; }
     GameObject Instantiate(Vector3 position, Quaternion rotation, Transform parent);
     GameObject Instantiate();
 }
-public class PrefabPoolManager : MonoBehaviour
+public class PrefabPoolManager : Singleton.SingletonMonoBehaviour<PrefabPoolManager>
 {
     [Serializable]
     public struct PreloadPrefabInfo
@@ -21,16 +19,20 @@ public class PrefabPoolManager : MonoBehaviour
         public enum InitPos { No, Parent, Random }
         [Header("初期位置")] public InitPos pos;
     }
-
     [SerializeField]
     private PreloadPrefabInfo[] preloadPrefabInfo;
     [NonSerialized]
-    private static readonly Dictionary<string, PrefabFamiliy> prefabFamilies = new Dictionary<string, PrefabFamiliy>();
-
-    void Awake()
+    private readonly Dictionary<string, PrefabFamiliy> prefabFamilies = new Dictionary<string, PrefabFamiliy>();
+    //PreAwake > Awake
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
+    static void PreAwake()
     {
-        if (preloadPrefabInfo == null) return;
-        PreloadPrefab(preloadPrefabInfo);
+        if (Instance.preloadPrefabInfo == null) return;
+        Instance.PreloadPrefab(Instance.preloadPrefabInfo);
+    }
+    protected override void Awake()
+    {
+        base.Awake();
     }
     void OnDisable()
     {
@@ -38,15 +40,15 @@ public class PrefabPoolManager : MonoBehaviour
         preloadPrefabInfo = default(PreloadPrefabInfo[]);
         Resources.UnloadUnusedAssets();
     }
-    public static bool ContainsKey(in string key) => prefabFamilies.ContainsKey(key);
-    public static IPrefabInstantiate Get(in string key)
+    public bool ContainsKey(in string key) => prefabFamilies.ContainsKey(key);
+    public IPrefabInstantiate Get(in string key)
     {
         if (!prefabFamilies.ContainsKey(key))
             return new SAFENULL();
 
         return prefabFamilies[key];
     }
-    public static void UnloadPrefab(in string key)
+    public void UnloadPrefab(in string key)
     {
         if (prefabFamilies.ContainsKey(key))
         {
@@ -65,29 +67,30 @@ public class PrefabPoolManager : MonoBehaviour
             switch (ppi.pos)
             {
                 case PreloadPrefabInfo.InitPos.No:
-                    prefabFamiliy.PreloadPrefab(ppi.prefab, transform.position, ppi.Parent == null ? transform : ppi.Parent);
+                    prefabFamiliy.PreloadPrefab(ppi.prefab, transform.position, ppi.Parent == null ? transform : ppi.Parent).Commit();
                     break;
                 case PreloadPrefabInfo.InitPos.Parent:
-                    prefabFamiliy.PreloadPrefab(ppi.prefab, ppi.Parent == null ? transform.position : ppi.Parent.position, ppi.Parent == null ? transform : ppi.Parent);
+                    prefabFamiliy.PreloadPrefab(ppi.prefab, ppi.Parent == null ? transform.position : ppi.Parent.position, ppi.Parent == null ? transform : ppi.Parent).Commit();
                     break;
                 case PreloadPrefabInfo.InitPos.Random:
-                    prefabFamiliy.PreloadPrefab(ppi.prefab, transform.position, ppi.Parent == null ? transform.position : ppi.Parent.position, ppi.Parent == null ? transform : ppi.Parent);
+                    prefabFamiliy.PreloadPrefab(ppi.prefab, transform.position, ppi.Parent == null ? transform.position : ppi.Parent.position, ppi.Parent == null ? transform : ppi.Parent).Commit();
                     break;
             }
-            prefabFamiliy.Commit();
             prefabFamilies.Add(ppi.key, prefabFamiliy);
         }
     }
     ///<summary>エラー時</summary>
     struct SAFENULL : IPrefabInstantiate
     {
-        public int MaxSize => 0;
-        public int RemainingSize => 0;
         public GameObject Instantiate(Vector3 position, Quaternion rotation, Transform parent) => null;
         public GameObject Instantiate() => null;
     }
+    interface ICommit
+    {
+        void Commit();
+    }
     /// <summary>オブジェクトをプールしておく</summary>
-    struct PrefabFamiliy : IPrefabInstantiate, IDisposable
+    class PrefabFamiliy : IPrefabInstantiate, ICommit, IDisposable
     {
         LinkedList<GameObject>.Enumerator enumerator;
         readonly LinkedList<GameObject> instancies;
@@ -98,8 +101,9 @@ public class PrefabPoolManager : MonoBehaviour
         {
             get
             {
-                GameObject prefab = New();
-                if (poolInstanceID.Remove(prefab.GetInstanceID())) prefab.SetActive(true);
+                GameObject prefab;
+                GetPrefab(out prefab);
+                if (!prefab.activeSelf) prefab.SetActive(true);
                 return prefab;
             }
             set
@@ -110,33 +114,31 @@ public class PrefabPoolManager : MonoBehaviour
                 instancies.AddLast(value);
             }
         }
-        GameObject New()
+        void GetPrefab(out GameObject game)
         {
-            if (!enumerator.MoveNext())
-            {
-                //初期化される
+            if (!enumerator.MoveNext()) {
                 enumerator = instancies.GetEnumerator();
-                while (enumerator.MoveNext()) enumerator.Current.SetActive(false);
-                enumerator = instancies.GetEnumerator();
-                return New();
+                enumerator.MoveNext();
             }
-            return enumerator.Current;
+            game = enumerator.Current;
         }
-
         ///<summary>事前格納用（1点指定）</summary>
-        public void PreloadPrefab(GameObject obj, Vector3 pos, Transform parent)
+        public ICommit PreloadPrefab(GameObject obj, Vector3 pos, Transform parent)
         {
             for (int i = 0; i < this.capacity; i++) 
                 Prefab = GameObject.Instantiate(obj, pos, Quaternion.identity, parent);
+
+            return this;
         }
         ///<summary>事前格納用（2点指定(ランダム)）</summary>
-        public void PreloadPrefab(GameObject obj, Vector3 pos1, Vector3 pos2, Transform parent)
+        public ICommit PreloadPrefab(GameObject obj, Vector3 pos1, Vector3 pos2, Transform parent)
         {
             for (int i = 0; i < this.capacity; i++)
                 Prefab = GameObject.Instantiate(obj, new Vector3(UnityEngine.Random.Range(pos1.x, pos2.x), 
                     UnityEngine.Random.Range(pos1.y, pos2.y), 
                     UnityEngine.Random.Range(pos1.z, pos2.z)),
                     UnityEngine.Random.rotation, parent);
+            return this;
         }
         ///<summary>インスタンス</summary>
         public GameObject Instantiate(Vector3 position, Quaternion rotation, Transform parent)
@@ -152,9 +154,7 @@ public class PrefabPoolManager : MonoBehaviour
         public bool Contains(GameObject obj) => obj == null ? false : poolInstanceID.Contains(obj.GetInstanceID());
         public void Dispose() { instancies.Clear(); poolInstanceID.Clear(); }
         ///<summary>任意のタイミングでコミット</summary>
-        public void Commit() { enumerator = instancies.GetEnumerator(); }
-        public int MaxSize { get => instancies.Count; }
-        public int RemainingSize { get => poolInstanceID.Count; }
+        void ICommit.Commit() => enumerator = instancies.GetEnumerator();
         public PrefabFamiliy(int capacity)
         {
             instancies = new LinkedList<GameObject>();
